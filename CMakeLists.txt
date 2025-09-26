@@ -4,7 +4,7 @@ find_package(Git)
 
 # Define the libcoro version string based on `git describe` command for the latest tagged release.
 execute_process(
-    COMMAND "${GIT_EXECUTABLE}" describe --match v[0-9]* --always --tags --dirty=-dirty
+    COMMAND "${GIT_EXECUTABLE}" describe --match "v[0-9]*" --always --tags --dirty=-dirty
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE GIT_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE)
