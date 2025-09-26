@@ -49,7 +49,8 @@ auto to_string(poll_op op) -> const std::string&;
 enum class poll_status
 {
     /// The poll operation was was successful.
-    event,
+    read,
+    write,
     /// The poll operation timed out.
     timeout,
     /// The file descriptor had an error while polling.

@@ -161,9 +161,9 @@ auto io_scheduler::shutdown() noexcept -> void
     // Only allow shutdown to occur once.
     if (m_shutdown_requested.exchange(true, std::memory_order::acq_rel) == false)
     {
-
         // Signal the event loop to stop asap, triggering the event fd is safe.
         const int value{1};
+        std::cerr << "---------------> SCHEDULER SHUTDOWN FD: " << m_shutdown_fd[0] << std::endl;
         ::write(m_shutdown_fd[1], reinterpret_cast<const void*>(&value), sizeof(value));
 
         if (m_io_thread.joinable())

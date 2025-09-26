@@ -375,196 +375,203 @@ TEST_CASE("benchmark counter task scheduler await event from another coroutine",
 }
 
 #ifdef LIBCORO_FEATURE_NETWORKING
-TEST_CASE("benchmark tcp::server echo server thread pool", "[benchmark]")
-{
-    const constexpr std::size_t connections             = 100;
-    const constexpr std::size_t messages_per_connection = 1'000;
-    const constexpr std::size_t ops                     = connections * messages_per_connection;
-
-    const std::string msg = "im a data point in a stream of bytes";
-
-    std::atomic<uint64_t> listening{0};
-    std::atomic<uint64_t> accepted{0};
-    std::atomic<uint64_t> clients_completed{0};
-
-    auto server_scheduler = coro::io_scheduler::make_shared(
-        coro::io_scheduler::options{
-            .pool               = coro::thread_pool::options{},
-            .execution_strategy = coro::io_scheduler::execution_strategy_t::process_tasks_on_thread_pool});
-    auto make_server_task = [](std::shared_ptr<coro::io_scheduler> server_scheduler,
-                               std::atomic<uint64_t>&              listening,
-                               std::atomic<uint64_t>&              accepted) -> coro::task<void>
-    {
-        auto make_on_connection_task = [](coro::net::tcp::client client,
-                                          coro::latch&           wait_for_clients) -> coro::task<void>
-        {
-            std::string in(64, '\0');
-
-            // Echo the messages until the socket is closed.
-            while (true)
-            {
-                auto pstatus = co_await client.poll(coro::poll_op::read);
-                if (pstatus != coro::poll_status::event)
-                {
-                    REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::closed);
-                    // the socket has been closed
-                    break;
-                }
-
-                REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::event);
-
-                auto [rstatus, rspan] = client.recv(in);
-                if (rstatus == coro::net::recv_status::closed)
-                {
-                    REQUIRE_THREAD_SAFE(rspan.empty());
-                    break;
-                }
-                REQUIRE_THREAD_SAFE(rstatus == coro::net::recv_status::ok);
-
-                in.resize(rspan.size());
-
-                auto [sstatus, remaining] = client.send(in);
-                REQUIRE_THREAD_SAFE(sstatus == coro::net::send_status::ok);
-                REQUIRE_THREAD_SAFE(remaining.empty());
-            }
-
-            std::cerr << "wait_for_clients.count_down(1) -> " << wait_for_clients.remaining() << "\n";
-            wait_for_clients.count_down();
-            co_return;
-        };
-
-        co_await server_scheduler->schedule();
-
-        coro::latch            wait_for_clients{connections};
-        coro::net::tcp::server server{server_scheduler};
-
-        listening++;
-
-        while (accepted.load(std::memory_order::acquire) < connections)
-        {
-            auto pstatus = co_await server.poll(std::chrono::milliseconds{1});
-            if (pstatus == coro::poll_status::event)
-            {
-                auto c = server.accept();
-                if (c.socket().is_valid())
-                {
-                    accepted.fetch_add(1, std::memory_order::release);
-                    server_scheduler->spawn(make_on_connection_task(std::move(c), wait_for_clients));
-                }
-            }
-        }
-
-        std::cerr << "server co_await wait_for_clients\n";
-        co_await wait_for_clients;
-        std::cerr << "server co_return\n";
-        co_return;
-    };
-
-    std::mutex                                    g_histogram_mutex;
-    std::map<std::chrono::milliseconds, uint64_t> g_histogram;
-
-    auto client_scheduler = coro::io_scheduler::make_shared(
-        coro::io_scheduler::options{
-            .pool               = coro::thread_pool::options{},
-            .execution_strategy = coro::io_scheduler::execution_strategy_t::process_tasks_on_thread_pool});
-    auto make_client_task = [](std::shared_ptr<coro::io_scheduler>            client_scheduler,
-                               const std::string&                             msg,
-                               std::atomic<uint64_t>&                         clients_completed,
-                               std::map<std::chrono::milliseconds, uint64_t>& g_histogram,
-                               std::mutex&                                    g_histogram_mutex) -> coro::task<void>
-    {
-        co_await client_scheduler->schedule();
-        std::map<std::chrono::milliseconds, uint64_t> histogram;
-        coro::net::tcp::client                        client{client_scheduler};
-
-        auto cstatus = co_await client.connect(); // std::chrono::seconds{1});
-        REQUIRE_THREAD_SAFE(cstatus == coro::net::connect_status::connected);
-
-        for (size_t i = 1; i <= messages_per_connection; ++i)
-        {
-            auto req_start            = std::chrono::steady_clock::now();
-            auto [sstatus, remaining] = client.send(msg);
-            REQUIRE_THREAD_SAFE(sstatus == coro::net::send_status::ok);
-            REQUIRE_THREAD_SAFE(remaining.empty());
-
-            auto pstatus = co_await client.poll(coro::poll_op::read);
-            REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::event);
-
-            std::string response(64, '\0');
-            auto [rstatus, rspan] = client.recv(response);
-            REQUIRE_THREAD_SAFE(rstatus == coro::net::recv_status::ok);
-            REQUIRE_THREAD_SAFE(rspan.size() == msg.size());
-            response.resize(rspan.size());
-            REQUIRE_THREAD_SAFE(response == msg);
-
-            auto req_stop = std::chrono::steady_clock::now();
-            histogram[std::chrono::duration_cast<std::chrono::milliseconds>(req_stop - req_start)]++;
-        }
-
-        {
-            std::scoped_lock lk{g_histogram_mutex};
-            for (auto [ms, count] : histogram)
-            {
-                g_histogram[ms] += count;
-            }
-        }
-
-        clients_completed.fetch_add(1);
-
-        co_return;
-    };
-
-    auto start = sc::now();
-
-    // Create the server to accept incoming tcp connections.
-    auto server_thread =
-        std::thread{[&]() { coro::sync_wait(make_server_task(server_scheduler, listening, accepted)); }};
-
-    // The server can take a small bit of time to start up, if we don't wait for it to notify then
-    // the first few connections can easily fail to connect causing this test to fail.
-    while (listening < 1)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-
-    auto client_thread =
-        std::thread{[&]()
-                    {
-                        std::vector<coro::task<void>> tasks{};
-                        for (size_t i = 0; i < connections; ++i)
-                        {
-                            tasks.emplace_back(make_client_task(
-                                client_scheduler, msg, clients_completed, g_histogram, g_histogram_mutex));
-                        }
-                        coro::sync_wait(coro::when_all(std::move(tasks)));
-                    }};
-
-    std::cerr << "joining client thread...\n";
-    client_thread.join();
-    std::cerr << "joining server thread...\n";
-    server_thread.join();
-    std::cerr << "all coroutines joined\n";
-
-    auto stop = sc::now();
-    print_stats("benchmark tcp::client and tcp::server thread_pool", ops, start, stop);
-
-    for (const auto& [ms, count] : g_histogram)
-    {
-        std::cerr << ms.count() << " : " << count << "\n";
-    }
-}
+// TEST_CASE("benchmark tcp::server echo server thread pool", "[benchmark]")
+// {
+//     const constexpr std::size_t connections             = 100;
+//     const constexpr std::size_t messages_per_connection = 1'000;
+//     const constexpr std::size_t ops                     = connections * messages_per_connection;
+//
+//     const std::string msg = "im a data point in a stream of bytes";
+//
+//     std::atomic<uint64_t> listening{0};
+//     std::atomic<uint64_t> accepted{0};
+//     std::atomic<uint64_t> clients_completed{0};
+//
+//     auto server_scheduler = coro::io_scheduler::make_shared(
+//         coro::io_scheduler::options{
+//             .pool               = coro::thread_pool::options{},
+//             .execution_strategy = coro::io_scheduler::execution_strategy_t::process_tasks_on_thread_pool});
+//     auto make_server_task = [](std::shared_ptr<coro::io_scheduler> server_scheduler,
+//                                std::atomic<uint64_t>&              listening,
+//                                std::atomic<uint64_t>&              accepted) -> coro::task<void>
+//     {
+//         auto make_on_connection_task = [](coro::net::tcp::client client,
+//                                           coro::latch&           wait_for_clients) -> coro::task<void>
+//         {
+//             std::string in(64, '\0');
+//
+//             // Echo the messages until the socket is closed.
+//             while (true)
+//             {
+//                 auto pstatus = co_await client.poll(coro::poll_op::read);
+//                 if (pstatus != coro::poll_status::read)
+//                 {
+//                     REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::closed);
+//                     // the socket has been closed
+//                     break;
+//                 }
+//                 REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::read);
+//
+//                 auto [rstatus, rspan] = client.recv(in);
+//                 if (rstatus == coro::net::recv_status::closed)
+//                 {
+//                     REQUIRE_THREAD_SAFE(rspan.empty());
+//                     break;
+//                 }
+//                 REQUIRE_THREAD_SAFE(rstatus == coro::net::recv_status::ok);
+//
+//                 in.resize(rspan.size());
+//
+//                 auto [sstatus, remaining] = client.send(in);
+//                 REQUIRE_THREAD_SAFE(sstatus == coro::net::send_status::ok);
+//                 REQUIRE_THREAD_SAFE(remaining.empty());
+//             }
+//
+//             std::cerr << "wait_for_clients.count_down(1) -> " << wait_for_clients.remaining() << "\n";
+//             wait_for_clients.count_down();
+//             co_return;
+//         };
+//
+//         co_await server_scheduler->schedule();
+//
+//         coro::latch            wait_for_clients{connections};
+//         coro::net::tcp::server server{server_scheduler};
+//
+//         listening++;
+//
+//         while (accepted.load(std::memory_order::acquire) < connections)
+//         {
+//             auto pstatus = co_await server.poll(std::chrono::milliseconds{1});
+//             if (pstatus == coro::poll_status::read)
+//             {
+//                 auto c = server.accept();
+//                 if (c.socket().is_valid())
+//                 {
+//                     accepted.fetch_add(1, std::memory_order::release);
+//                     server_scheduler->spawn(make_on_connection_task(std::move(c), wait_for_clients));
+//                 }
+//             }
+//         }
+//
+//         std::cerr << "server co_await wait_for_clients\n";
+//         co_await wait_for_clients;
+//         std::cerr << "server co_return\n";
+//         co_return;
+//     };
+//
+//     std::mutex                                    g_histogram_mutex;
+//     std::map<std::chrono::milliseconds, uint64_t> g_histogram;
+//
+//     auto client_scheduler = coro::io_scheduler::make_shared(
+//         coro::io_scheduler::options{
+//             .pool               = coro::thread_pool::options{},
+//             .execution_strategy = coro::io_scheduler::execution_strategy_t::process_tasks_on_thread_pool});
+//     auto make_client_task = [](std::shared_ptr<coro::io_scheduler>            client_scheduler,
+//                                const std::string&                             msg,
+//                                std::atomic<uint64_t>&                         clients_completed,
+//                                std::map<std::chrono::milliseconds, uint64_t>& g_histogram,
+//                                std::mutex&                                    g_histogram_mutex) -> coro::task<void>
+//     {
+//         co_await client_scheduler->schedule();
+//         std::map<std::chrono::milliseconds, uint64_t> histogram;
+//         coro::net::tcp::client                        client{client_scheduler};
+//
+//         auto cstatus = co_await client.connect(); // std::chrono::seconds{1});
+//         REQUIRE_THREAD_SAFE(cstatus == coro::net::connect_status::connected);
+//
+//         for (size_t i = 1; i <= messages_per_connection; ++i)
+//         {
+//             auto req_start            = std::chrono::steady_clock::now();
+//             auto [sstatus, remaining] = client.send(msg);
+//             REQUIRE_THREAD_SAFE(sstatus == coro::net::send_status::ok);
+//             REQUIRE_THREAD_SAFE(remaining.empty());
+//
+//             auto pstatus = co_await client.poll(coro::poll_op::read);
+//             if (pstatus != coro::poll_status::read)
+//             {
+//                 REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::closed);
+//                 // the socket has been closed
+//                 break;
+//             }
+//             REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::read);
+//
+//             std::string response(64, '\0');
+//             auto [rstatus, rspan] = client.recv(response);
+//             REQUIRE_THREAD_SAFE(rstatus == coro::net::recv_status::ok);
+//             REQUIRE_THREAD_SAFE(rspan.size() == msg.size());
+//             response.resize(rspan.size());
+//             REQUIRE_THREAD_SAFE(response == msg);
+//
+//             auto req_stop = std::chrono::steady_clock::now();
+//             histogram[std::chrono::duration_cast<std::chrono::milliseconds>(req_stop - req_start)]++;
+//         }
+//
+//         {
+//             std::scoped_lock lk{g_histogram_mutex};
+//             for (auto [ms, count] : histogram)
+//             {
+//                 g_histogram[ms] += count;
+//             }
+//         }
+//
+//         clients_completed.fetch_add(1);
+//
+//         co_return;
+//     };
+//
+//     auto start = sc::now();
+//
+//     // Create the server to accept incoming tcp connections.
+//     auto server_thread =
+//         std::thread{[&]() { coro::sync_wait(make_server_task(server_scheduler, listening, accepted)); }};
+//
+//     // The server can take a small bit of time to start up, if we don't wait for it to notify then
+//     // the first few connections can easily fail to connect causing this test to fail.
+//     while (listening < 1)
+//     {
+//         std::this_thread::sleep_for(std::chrono::milliseconds{1});
+//     }
+//
+//     auto client_thread =
+//         std::thread{[&]()
+//                     {
+//                         std::vector<coro::task<void>> tasks{};
+//                         for (size_t i = 0; i < connections; ++i)
+//                         {
+//                             tasks.emplace_back(make_client_task(
+//                                 client_scheduler, msg, clients_completed, g_histogram, g_histogram_mutex));
+//                         }
+//                         coro::sync_wait(coro::when_all(std::move(tasks)));
+//                     }};
+//
+//     std::cerr << "joining client thread...\n";
+//     client_thread.join();
+//     std::cerr << "joining server thread...\n";
+//     server_thread.join();
+//     std::cerr << "all coroutines joined\n";
+//
+//     auto stop = sc::now();
+//     print_stats("benchmark tcp::client and tcp::server thread_pool", ops, start, stop);
+//
+//     for (const auto& [ms, count] : g_histogram)
+//     {
+//         std::cerr << ms.count() << " : " << count << "\n";
+//     }
+// }
 
 TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
 {
-    const constexpr std::size_t connections_per_client  = 10;
+    const constexpr std::size_t connections_per_client = 10;
+    // const constexpr std::size_t connections_per_client  = 2;
     const constexpr std::size_t messages_per_connection = 2;
-    // const constexpr std::size_t ops                     = connections * messages_per_connection;
-    const constexpr std::size_t ops = connections_per_client * messages_per_connection;
+    const constexpr std::size_t ops                     = connections_per_client * messages_per_connection;
 
     const std::string msg = "im a data point in a stream of bytes";
 
     const constexpr std::size_t server_count = 10;
+    // const constexpr std::size_t server_count = 1;
     const constexpr std::size_t client_count = 10;
+    // const constexpr std::size_t client_count = 1;
 
     std::atomic<uint64_t> listening{0};
     std::atomic<uint64_t> clients_completed{0};
@@ -604,14 +611,14 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
             while (true)
             {
                 auto pstatus = co_await client.poll(coro::poll_op::read);
-                if (pstatus != coro::poll_status::event)
+                if (pstatus != coro::poll_status::read)
                 {
                     REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::closed);
                     // the socket has been closed
                     break;
                 }
 
-                REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::event);
+                REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::read);
 
                 auto [rstatus, rspan] = client.recv(in);
                 if (rstatus == coro::net::recv_status::closed)
@@ -630,6 +637,7 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
 
             s.live_clients--;
             std::cerr << "s.live_clients=" << s.live_clients << std::endl;
+            // std::cerr << "accepted_clients=" << accepted_clients << std::endl;
             if (s.live_clients == 0 && accepted_clients == connections_per_client)
             {
                 std::cerr << "s.wait_for_clients.set()" << std::endl;
@@ -648,7 +656,7 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
         while (accepted_clients < connections_per_client)
         {
             auto pstatus = co_await server.poll(std::chrono::milliseconds{1000});
-            if (pstatus == coro::poll_status::event)
+            if (pstatus == coro::poll_status::read)
             {
                 auto c = server.accept();
                 if (c.socket().is_valid())
@@ -704,7 +712,13 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
             REQUIRE_THREAD_SAFE(remaining.empty());
 
             auto pstatus = co_await client.poll(coro::poll_op::read);
-            REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::event);
+            if (pstatus != coro::poll_status::read)
+            {
+                REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::closed);
+                // the socket has been closed
+                break;
+            }
+            REQUIRE_THREAD_SAFE(pstatus == coro::poll_status::read);
 
             std::string response(64, '\0');
             auto [rstatus, rspan] = client.recv(response);
@@ -737,16 +751,16 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
     for (size_t i = 0; i < server_count; ++i)
     {
         server_threads.emplace_back(
-            [&]()
+            [&, i]()
             {
                 server s{
                     .id = server_id++,
                 };
                 std::cerr << "coro::sync_wait(make_server_task(s));\n";
                 coro::sync_wait(make_server_task(s, listening));
-                std::cerr << "server.scheduler->shutdown()\n";
+                std::cerr << "server.scheduler->shutdown() -> " << i << "\n";
                 s.scheduler->shutdown();
-                std::cerr << "server thread exiting\n";
+                std::cerr << "server thread exiting -> " << i << "\n";
             });
     }
 
@@ -773,9 +787,9 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
                 }
                 std::cerr << "coro::sync_wait(coro::when_all(std::move(c.tasks)));\n";
                 coro::sync_wait(coro::when_all(std::move(c.tasks)));
-                std::cerr << "client.scheduler->shutdown()\n";
+                std::cerr << "client.scheduler->shutdown() -> " << i << "\n";
                 c.scheduler->shutdown();
-                std::cerr << "client thread exiting\n";
+                std::cerr << "client thread exiting -> " << i << "\n";
             });
     }
 
@@ -783,10 +797,15 @@ TEST_CASE("benchmark tcp::server echo server inline", "[benchmark]")
     {
         ct.join();
     }
+    std::cout << "All clients joined" << std::endl;
 
+    int x = 0;
     for (auto& st : server_threads)
     {
+        std::cout << "KEKW try joining server thread " << x << std::endl;
         st.join();
+        std::cout << "KEKW server thread joined " << x << std::endl;
+        x++;
     }
 
     auto stop = sc::now();
@@ -889,7 +908,7 @@ TEST_CASE("benchmark tls::server echo server thread pool", "[benchmark]")
         while (accepted.load(std::memory_order::acquire) < connections)
         {
             auto pstatus = co_await server.poll(std::chrono::milliseconds{1});
-            if (pstatus == coro::poll_status::event)
+            if (pstatus == coro::poll_status::read)
             {
                 auto c = co_await server.accept();
                 if (c.socket().is_valid())

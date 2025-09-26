@@ -44,7 +44,7 @@ Connection: keep-alive
             auto pstatus = co_await server.poll();
             switch (pstatus)
             {
-                case coro::poll_status::event:
+                case coro::poll_status::read:
                 {
                     auto client = server.accept();
                     if (client.socket().is_valid())
@@ -53,6 +53,7 @@ Connection: keep-alive
                     } // else report error or something if the socket was invalid or could not be accepted.
                 }
                 break;
+                case coro::poll_status::write:
                 case coro::poll_status::error:
                 case coro::poll_status::closed:
                 case coro::poll_status::timeout:

@@ -216,7 +216,8 @@ private:
         auto result = co_await m_executor->poll(fd, ops, m_timeout);
         switch (result)
         {
-            case poll_status::event:
+            case poll_status::read:
+            case poll_status::write:
             {
                 auto read_sock  = poll_op_readable(ops) ? fd : ARES_SOCKET_BAD;
                 auto write_sock = poll_op_writeable(ops) ? fd : ARES_SOCKET_BAD;
