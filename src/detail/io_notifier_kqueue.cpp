@@ -156,7 +156,8 @@ auto io_notifier_kqueue::next_events(
 
 auto io_notifier_kqueue::event_to_poll_status(const event_t& event) -> poll_status
 {
-    if (event.filter & EVFILT_READ || event.filter & EVFILT_WRITE)
+    // if (event.filter & EVFILT_READ || event.filter & EVFILT_WRITE)
+    if (event.filter == EVFILT_READ || event.filter == EVFILT_WRITE || event.filter == EVFILT_TIMER)
     {
         return poll_status::event;
     }
