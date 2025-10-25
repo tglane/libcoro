@@ -127,7 +127,7 @@ auto io_scheduler::yield_until(time_point time) -> coro::task<void>
 auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds timeout) -> coro::task<poll_status>
 {
     // Because the size will drop when this coroutine suspends every poll needs to undo the subtraction
-    // on the number of active tasks in the scheduler.  When this task is resumed by the event loop.
+    // on the number of active tasks in the scheduler. When this task is resumed by the event loop.
     m_size.fetch_add(1, std::memory_order::release);
 
     // Setup two events, a timeout event and the actual poll for op event.
@@ -151,7 +151,9 @@ auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds tim
     // The event loop will 'clean-up' whichever event didn't win since the coroutine is scheduled
     // onto the thread poll its possible the other type of event could trigger while its waiting
     // to execute again, thus restarting the coroutine twice, that would be quite bad.
+    std::cout << "co_await on fd " << pi.m_fd << std::endl;
     auto result = co_await pi;
+    std::cout << "finished co_await on fd " << pi.m_fd << std::endl;
     m_size.fetch_sub(1, std::memory_order::release);
     co_return result;
 }
@@ -165,15 +167,19 @@ auto io_scheduler::shutdown() noexcept -> void
         const int value{1};
         ::write(m_shutdown_fd[1], reinterpret_cast<const void*>(&value), sizeof(value));
 
+        std::cout << "Scheduler stop to " << m_shutdown_fd[0] << std::endl;
         if (m_io_thread.joinable())
         {
+            std::cout << "Wait for io thread to join" << std::endl;
             m_io_thread.join();
         }
+        std::cout << "Scheduler io thread joinded" << std::endl;
 
         if (m_thread_pool != nullptr)
         {
             m_thread_pool->shutdown();
         }
+        std::cout << "Scheduler threadpool joinded" << std::endl;
     }
 }
 
@@ -224,6 +230,8 @@ auto io_scheduler::process_events_dedicated_thread() -> void
     // Execute tasks until stopped or there are no more tasks to complete.
     while (!m_shutdown_requested.load(std::memory_order::acquire) || size() > 0)
     {
+        std::cout << "Io thread loop" << std::endl;
+        std::cout << "Io thread shutdown req: " << m_shutdown_requested << " .. size: " << size() << std::endl;
         process_events_execute(m_default_timeout);
     }
     m_io_processing.exchange(false, std::memory_order::release);

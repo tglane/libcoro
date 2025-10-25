@@ -1,6 +1,7 @@
 #pragma once
 
 // EMSCRIPTEN does not currently support std::jthread or std::stop_source|token.
+#include <memory>
 #ifndef EMSCRIPTEN
 
     #include "coro/concepts/awaitable.hpp"
@@ -14,6 +15,7 @@
     #include <atomic>
     #include <cassert>
     #include <coroutine>
+    #include <iostream>
     #include <optional>
     #include <stop_token>
     #include <utility>
@@ -39,8 +41,12 @@ struct when_any_variant_traits<void>
 
 template<size_t index, typename return_type, concepts::awaitable awaitable>
 auto make_when_any_tuple_task(
-    std::atomic<bool>& first_completed, coro::event& notify, std::optional<return_type>& return_value, awaitable a)
-    -> coro::task<void>
+    std::atomic<bool>&                        first_completed,
+    size_t&                                   first_completed_index,
+    std::vector<std::coroutine_handle<void>>& handles,
+    coro::event&                              notify,
+    std::optional<return_type>&               return_value,
+    awaitable                                 a) -> coro::task<void>
 {
     auto expected = false;
     if constexpr (concepts::awaitable_void<awaitable>)
@@ -49,7 +55,19 @@ auto make_when_any_tuple_task(
         if (first_completed.compare_exchange_strong(
                 expected, true, std::memory_order::acq_rel, std::memory_order::relaxed))
         {
+            first_completed_index = index;
             return_value.emplace(std::in_place_index<index>, std::monostate{});
+
+            // Destroy the remaining handles to stop there coroutines from running indefinetely
+            for (size_t i = 0; i < handles.size(); ++i)
+            {
+                if (i != first_completed_index && handles[i])
+                {
+                    std::cout << "Resuming handle at " << handles[i].address() << std::endl;
+                    handles[i].resume();
+                }
+            }
+
             notify.set();
         }
     }
@@ -59,11 +77,34 @@ auto make_when_any_tuple_task(
         if (first_completed.compare_exchange_strong(
                 expected, true, std::memory_order::acq_rel, std::memory_order::relaxed))
         {
+            first_completed_index = index;
             return_value.emplace(std::in_place_index<index>, std::move(result));
+
+            // Destroy the remaining handles to stop there coroutines from running indefinetely
+            for (size_t i = 0; i < handles.size(); ++i)
+            {
+                if (i != first_completed_index && handles[i])
+                {
+                    std::cout << "Resuming handle at " << handles[i].address() << std::endl;
+                    handles[i].resume();
+                }
+            }
+
             notify.set();
         }
     }
+
     co_return;
+}
+
+template<typename... Ts>
+std::vector<std::coroutine_handle<void>> collect_coroutine_handles(Ts&... tasks)
+{
+    auto handles = std::vector<std::coroutine_handle<void>>();
+    handles.reserve(sizeof...(tasks));
+    auto collect = [&handles](auto&... task_refs) { ((handles.push_back(task_refs.handle())), ...); };
+    (collect(tasks), ...);
+    return handles;
 }
 
 template<typename return_type, concepts::awaitable... awaitable_type, size_t... indices>
@@ -74,8 +115,45 @@ template<typename return_type, concepts::awaitable... awaitable_type, size_t... 
     awaitable_type... awaitables) -> coro::detail::task_self_deleting
 {
     std::atomic<bool> first_completed{false};
-    co_await coro::when_all(
-        make_when_any_tuple_task<indices>(first_completed, notify, return_value, std::move(awaitables))...);
+    size_t            first_completed_index{};
+
+    auto handles = collect_coroutine_handles(awaitables...);
+
+    // Create all tasks
+    auto tasks = std::make_tuple(
+        make_when_any_tuple_task<indices>(
+            first_completed, first_completed_index, handles, notify, return_value, std::move(awaitables))...);
+
+    // auto handles = collect_coroutine_handles(tasks);
+
+    // Create a cancellation task that will destroy remaining tasks after first completion
+    // auto cancellation_task = [&tasks, &notify]() -> coro::task<void>
+    // auto cancellation_task = [&handles, &notify, &first_completed_index]() -> coro::task<void>
+    // {
+    //     co_await notify; // Wait for first completion
+
+    //     // for (auto& handle : handles)
+    //     // {
+    //     //     handle.destroy();
+    //     // }
+    //     for (size_t i = 0; i < handles.size(); ++i)
+    //     {
+    //         if (i != first_completed_index)
+    //         {
+    //             // handles[i].resume();
+    //         }
+    //     }
+
+    //     co_return;
+    // };
+
+    // Problem: tasks will on dtor also destroy the handles that were previously destroyed by the when_any_tuple_tasks
+    //  -> we need to move the handle out of the task after we destroyed it so that the task can not destroy it.
+
+    // Start all tasks and the cancellation task
+    // co_await coro::when_all(std::get<indices>(std::move(tasks))..., cancellation_task());
+    co_await coro::when_all(std::get<indices>(std::move(tasks))...);
+
     co_return;
 }
 
@@ -128,6 +206,20 @@ static auto make_when_any_controller_task_return_void(range_type awaitables, cor
     }
 
     co_await coro::when_all(std::move(tasks));
+    // Create a cancellation task that will destroy remaining tasks after first completion
+    // auto cancellation_task = [&tasks, &notify]() -> coro::task<void>
+    // {
+    //     co_await notify; // Wait for first completion
+
+    //     // Destroy all tasks to cancel them
+    //     for (auto& task : tasks)
+    //     {
+    //         task.destroy();
+    //     }
+    //     co_return;
+    // };
+
+    // co_await coro::when_all(std::move(tasks), cancellation_task());
     co_return;
 }
 
@@ -160,6 +252,20 @@ static auto make_when_any_controller_task(
     }
 
     co_await coro::when_all(std::move(tasks));
+    // Create a cancellation task that will destroy remaining tasks after first completion
+    // auto cancellation_task = [&tasks, &notify]() -> coro::task<void>
+    // {
+    //     co_await notify; // Wait for first completion
+
+    //     // Destroy all tasks to cancel them
+    //     for (auto& task : tasks)
+    //     {
+    //         task.destroy();
+    //     }
+    //     co_return;
+    // };
+
+    // co_await coro::when_all(std::move(tasks), cancellation_task());
     co_return;
 }
 

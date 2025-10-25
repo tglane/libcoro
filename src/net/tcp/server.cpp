@@ -18,6 +18,9 @@ server::server(std::shared_ptr<io_scheduler> scheduler, options opts)
     {
         throw std::runtime_error{"tcp::server cannot have a nullptr io_scheduler"};
     }
+
+    m_shutdown_fd = std::array<fd_t, 2>{};
+    ::pipe(m_shutdown_fd.data());
 }
 
 server::server(server&& other)

@@ -7,6 +7,8 @@
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "coro/detail/timer_handle.hpp"
 
@@ -148,8 +150,11 @@ auto io_notifier_kqueue::next_events(
     };
     const int num_ready = ::kevent(
         m_fd, nullptr, 0, ready_set.data(), std::min(ready_set.size(), ready_events.capacity()), &timeout_spec);
-    for (std::size_t i = 0; i < num_ready; i++)
+    std::cerr << "RET OF KEVENT: " << num_ready << std::endl;
+    for (int i = 0; i < num_ready; i++)
     {
+        std::cerr << "Event fd: " << ready_set[i].ident << " with " << static_cast<int>(ready_set[i].filter)
+                  << std::endl;
         ready_events.emplace_back(
             static_cast<detail::poll_info*>(ready_set[i].udata),
             io_notifier_kqueue::event_to_poll_status(ready_set[i]));

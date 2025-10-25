@@ -26,6 +26,10 @@ int main()
         co_return -1;
     };
 
+    {
+        auto result = coro::sync_wait(coro::when_any(make_timeout_task(scheduler), make_timeout_task(scheduler)));
+    }
+
     // Example showing the long running task completing first.
     {
         std::vector<coro::task<int64_t>> tasks{};

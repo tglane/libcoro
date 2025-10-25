@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <coroutine>
+#include <iostream>
 #include <map>
 #include <optional>
 
@@ -28,8 +29,9 @@ struct poll_info
 {
     using timed_events = std::multimap<coro::time_point, detail::poll_info*>;
 
-    poll_info()  = default;
-    ~poll_info() = default;
+    poll_info() = default;
+    // ~poll_info() = default;
+    ~poll_info() { std::cout << "~poll_info of " << m_fd << std::endl; }
 
     poll_info(fd_t fd, coro::poll_op op) : m_fd(fd), m_op(op) {}
 
@@ -42,13 +44,19 @@ struct poll_info
     {
         explicit poll_awaiter(poll_info& pi) noexcept : m_pi(pi) {}
 
+        // ~poll_awaiter() { std::cerr << "~poll_awaiter on " << m_pi.m_fd << std::endl; }
+
         auto await_ready() const noexcept -> bool { return false; }
         auto await_suspend(std::coroutine_handle<> awaiting_coroutine) noexcept -> void
         {
             m_pi.m_awaiting_coroutine = awaiting_coroutine;
             std::atomic_thread_fence(std::memory_order::release);
         }
-        auto await_resume() noexcept -> coro::poll_status { return m_pi.m_poll_status; }
+        auto await_resume() noexcept -> coro::poll_status
+        {
+            std::cout << "Resuming " << m_pi.m_fd << " with " << static_cast<int>(m_pi.m_poll_status) << std::endl;
+            return m_pi.m_poll_status;
+        }
 
         poll_info& m_pi;
     };

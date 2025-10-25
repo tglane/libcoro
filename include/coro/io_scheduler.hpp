@@ -282,7 +282,7 @@ public:
      *               Given zero or negative amount of time this behaves identical to schedule().
      */
     template<class rep_type, class period_type>
-     [[nodiscard]] auto schedule_after(std::chrono::duration<rep_type, period_type> amount) -> coro::task<void>
+    [[nodiscard]] auto schedule_after(std::chrono::duration<rep_type, period_type> amount) -> coro::task<void>
     {
         return yield_for_internal(std::chrono::duration_cast<std::chrono::nanoseconds>(amount));
     }
