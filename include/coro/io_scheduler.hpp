@@ -17,7 +17,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -282,7 +281,7 @@ public:
      *               Given zero or negative amount of time this behaves identical to schedule().
      */
     template<class rep_type, class period_type>
-     [[nodiscard]] auto schedule_after(std::chrono::duration<rep_type, period_type> amount) -> coro::task<void>
+    [[nodiscard]] auto schedule_after(std::chrono::duration<rep_type, period_type> amount) -> coro::task<void>
     {
         return yield_for_internal(std::chrono::duration_cast<std::chrono::nanoseconds>(amount));
     }
@@ -413,12 +412,14 @@ public:
 
     [[nodiscard]] auto is_shutdown() const -> bool { return m_shutdown_requested.load(std::memory_order::acquire); }
 
+    auto io_notifier() -> io_notifier& { return m_io_notifier; }
+
 private:
     /// The configuration options.
     options m_opts;
 
     /// The io event notifier.
-    io_notifier m_io_notifier;
+    ::coro::io_notifier m_io_notifier;
     /// The timer handle for timed events, e.g. yield_for() or scheduler_after().
     detail::timer_handle m_timer;
     /// The event loop fd to trigger a shutdown.

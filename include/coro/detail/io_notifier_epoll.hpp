@@ -28,6 +28,8 @@ class io_notifier_epoll
 
     friend class detail::timer_handle;
 
+    static auto event_to_poll_status(const event_t& event) -> poll_status;
+
 public:
     io_notifier_epoll();
 
@@ -51,8 +53,6 @@ public:
     auto next_events(
         std::vector<std::pair<detail::poll_info*, coro::poll_status>>& ready_events, std::chrono::milliseconds timeout)
         -> void;
-
-    static auto event_to_poll_status(const event_t& event) -> poll_status;
 };
 
 } // namespace coro::detail

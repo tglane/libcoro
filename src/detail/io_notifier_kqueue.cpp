@@ -8,7 +8,9 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "coro/detail/poll_info.hpp"
 #include "coro/detail/timer_handle.hpp"
+#include "coro/poll.hpp"
 
 using namespace std::chrono_literals;
 
@@ -58,12 +60,17 @@ auto io_notifier_kqueue::watch(fd_t fd, coro::poll_op op, void* data, bool keep)
     {
         mode |= EV_ONESHOT;
     }
+
     EV_SET(&event_data, fd, static_cast<int16_t>(op), mode, 0, 0, data);
     return ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr) != -1;
 }
 
 auto io_notifier_kqueue::watch(detail::poll_info& pi) -> bool
 {
+    // TODO Rework this? This causes a segfault in some test cases?
+    m_event_handles.insert({{pi.m_fd, pi.m_op}, static_cast<void*>(&pi)});
+    watch(pi.m_fd, poll_op::user_triggered, nullptr);
+
     // For read-write event, we need to register both event types separately to the kqueue
     if (pi.m_op == coro::poll_op::read_write)
     {
@@ -148,11 +155,32 @@ auto io_notifier_kqueue::next_events(
     };
     const int num_ready = ::kevent(
         m_fd, nullptr, 0, ready_set.data(), std::min(ready_set.size(), ready_events.capacity()), &timeout_spec);
-    for (std::size_t i = 0; i < num_ready; i++)
+    for (int i = 0; i < num_ready; i++)
     {
-        ready_events.emplace_back(
-            static_cast<detail::poll_info*>(ready_set[i].udata),
-            io_notifier_kqueue::event_to_poll_status(ready_set[i]));
+        detail::poll_info* udata = nullptr;
+        if (ready_set[i].filter == EVFILT_USER)
+        {
+            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
+            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
+            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
+            {
+                udata = static_cast<detail::poll_info*>(entry->second);
+                m_event_handles.erase(entry);
+            }
+        }
+        else
+        {
+            udata = static_cast<detail::poll_info*>(ready_set[i].udata);
+
+            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
+            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
+            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
+            {
+                m_event_handles.erase(entry);
+            }
+        }
+
+        ready_events.emplace_back(udata, io_notifier_kqueue::event_to_poll_status(ready_set[i]));
     }
 }
 
@@ -181,6 +209,10 @@ auto io_notifier_kqueue::event_to_poll_status(const event_t& event) -> poll_stat
     {
         // Due timer is handled like a read event by the lib
         return poll_status::read;
+    }
+    else if (event.filter == EVFILT_USER)
+    {
+        return poll_status::closed;
     }
 
     throw std::runtime_error{"invalid kqueue state"};

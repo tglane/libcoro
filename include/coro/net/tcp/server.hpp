@@ -6,6 +6,7 @@
 #include "coro/task.hpp"
 
 #include <fcntl.h>
+#include <sys/event.h>
 #include <sys/socket.h>
 
 namespace coro
@@ -68,6 +69,25 @@ public:
     [[nodiscard]] auto accept_socket() -> net::socket& { return m_accept_socket; }
     [[nodiscard]] auto accept_socket() const -> const net::socket& { return m_accept_socket; }
     /** @} */
+
+    auto shutdown()
+    {
+        // Trigger user event with socket fd as ident
+        auto evt = detail::event_t{};
+        EV_SET(
+            &evt,
+            m_accept_socket.native_handle(),
+            EVFILT_USER,
+            0,
+            NOTE_TRIGGER,
+            0,
+            reinterpret_cast<void*>(poll_op::read));
+        kevent(m_io_scheduler->io_notifier().native_handle(), &evt, 1, NULL, 0, NULL);
+
+        std::cout << "Called shutdown for " << m_accept_socket.native_handle() << std::endl;
+
+        // m_accept_socket.shutdown(coro::poll_op::read_write);
+    }
 
 private:
     friend client;
