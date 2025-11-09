@@ -29,10 +29,7 @@ enum class poll_op : int64_t
     /// Poll for write operations.
     write = EVFILT_WRITE,
     /// Poll for read and write operations.
-    // read_write = EVFILT_READ | EVFILT_WRITE
     read_write = -5,
-    /// Event triggered by user code
-    user_triggered = EVFILT_USER,
 };
 #endif
 
@@ -59,7 +56,9 @@ enum class poll_status
     /// The file descriptor had an error while polling.
     error,
     /// The file descriptor has been closed by the remote or an internal error/close.
-    closed
+    closed,
+    /// The poll operation was cancelled
+    cancelled,
 };
 
 auto to_string(poll_status status) -> const std::string&;

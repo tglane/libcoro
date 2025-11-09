@@ -25,8 +25,8 @@ class io_notifier_kqueue
 {
     static const constexpr std::size_t m_max_events = 16;
 
-    std::map<std::pair<fd_t, poll_op>, void*> m_event_handles;
-    fd_t                                      m_fd;
+    // std::map<std::pair<fd_t, poll_op>, void*> m_event_handles;
+    fd_t m_fd;
 
     friend class detail::timer_handle;
 
@@ -45,6 +45,8 @@ public:
     auto watch_timer(const detail::timer_handle& timer, std::chrono::nanoseconds duration) -> bool;
 
     auto watch(fd_t fd, coro::poll_op op, void* data, bool keep = false) -> bool;
+
+    auto watch_with_cancel(poll_info& pi, notify_trigger& cancel) -> bool;
 
     auto watch(detail::poll_info& pi) -> bool;
 

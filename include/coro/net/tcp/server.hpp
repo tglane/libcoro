@@ -1,16 +1,17 @@
 #pragma once
 
+#include "coro/detail/poll_info.hpp"
 #include "coro/net/ip_address.hpp"
 #include "coro/net/socket.hpp"
 #include "coro/net/tcp/client.hpp"
 #include "coro/task.hpp"
 
 #include <fcntl.h>
-#include <sys/event.h>
 #include <sys/socket.h>
 
 namespace coro
 {
+
 class io_scheduler;
 } // namespace coro
 
@@ -52,7 +53,8 @@ public:
      */
     auto poll(std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) -> coro::task<coro::poll_status>
     {
-        return m_io_scheduler->poll(m_accept_socket, coro::poll_op::read, timeout);
+        // return m_io_scheduler->poll(m_accept_socket, coro::poll_op::read, timeout);
+        return m_io_scheduler->poll(m_accept_socket, coro::poll_op::read, timeout, m_cancel_trigger);
     }
 
     /**
@@ -72,21 +74,8 @@ public:
 
     auto shutdown()
     {
-        // Trigger user event with socket fd as ident
-        auto evt = detail::event_t{};
-        EV_SET(
-            &evt,
-            m_accept_socket.native_handle(),
-            EVFILT_USER,
-            0,
-            NOTE_TRIGGER,
-            0,
-            reinterpret_cast<void*>(poll_op::read));
-        kevent(m_io_scheduler->io_notifier().native_handle(), &evt, 1, NULL, 0, NULL);
-
-        std::cout << "Called shutdown for " << m_accept_socket.native_handle() << std::endl;
-
-        // m_accept_socket.shutdown(coro::poll_op::read_write);
+        m_cancel_trigger.pull();
+        m_accept_socket.shutdown(coro::poll_op::read_write);
     }
 
 private:
@@ -97,6 +86,8 @@ private:
     options m_options;
     /// The socket for accepting new tcp connections on.
     net::socket m_accept_socket{-1};
+
+    detail::notify_trigger m_cancel_trigger{};
 };
 
 } // namespace coro::net::tcp

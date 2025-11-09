@@ -4,13 +4,71 @@
 #include "coro/poll.hpp"
 #include "coro/time.hpp"
 
+#include <array>
 #include <atomic>
 #include <coroutine>
 #include <map>
 #include <optional>
 
+// pipe include
+#include <unistd.h>
+
 namespace coro::detail
 {
+
+class notify_trigger
+{
+    fd_t m_issuer{-1};
+    fd_t m_receiver{-1};
+
+public:
+    notify_trigger()
+    {
+        auto notify_fds = std::array<fd_t, 2>{};
+        ::pipe(notify_fds.data());
+
+        m_issuer   = notify_fds[1];
+        m_receiver = notify_fds[0];
+    }
+
+    notify_trigger(const notify_trigger&) = delete;
+    notify_trigger(notify_trigger&& other) { *this = std::move(other); }
+
+    notify_trigger& operator=(const notify_trigger&) = delete;
+    notify_trigger& operator=(notify_trigger&& other)
+    {
+        m_issuer   = other.m_issuer;
+        m_receiver = other.m_receiver;
+
+        other.m_issuer   = -1;
+        other.m_receiver = -1;
+
+        return *this;
+    }
+
+    ~notify_trigger()
+    {
+        if (m_issuer != -1)
+        {
+            ::close(m_issuer);
+            m_issuer = -1;
+        }
+        if (m_receiver != -1)
+        {
+            ::close(m_receiver);
+            m_receiver = -1;
+        }
+    }
+
+    auto receiver_handle() const -> fd_t { return m_receiver; }
+
+    auto pull() -> void
+    {
+        const int value{1};
+        ::write(m_issuer, reinterpret_cast<const void*>(&value), sizeof(value));
+    }
+};
+
 /**
  * Poll Info encapsulates everything about a poll operation for the event as well as its paired
  * timeout.  This is important since coroutines that are waiting on an event or timeout do not

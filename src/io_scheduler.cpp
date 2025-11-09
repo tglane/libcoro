@@ -6,6 +6,7 @@
 #include <optional>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <type_traits>
 #include <unistd.h>
 
 using namespace std::chrono_literals;
@@ -25,11 +26,12 @@ io_scheduler::io_scheduler(options&& opts, private_constructor)
 
     m_shutdown_fd = std::array<fd_t, 2>{};
     ::pipe(m_shutdown_fd.data());
-    m_io_notifier.watch(m_shutdown_fd[0], coro::poll_op::read, const_cast<void*>(m_shutdown_ptr), true);
+
+    m_io_notifier.watch(m_shutdown_fd[0], poll_op::read, const_cast<void*>(m_shutdown_ptr), true);
 
     m_schedule_fd = std::array<fd_t, 2>{};
     ::pipe(m_schedule_fd.data());
-    m_io_notifier.watch(m_schedule_fd[0], coro::poll_op::read, const_cast<void*>(m_schedule_ptr), true);
+    m_io_notifier.watch(m_schedule_fd[0], poll_op::read, const_cast<void*>(m_schedule_ptr), true);
 
     m_recent_events.reserve(m_max_events);
 }
@@ -124,7 +126,11 @@ auto io_scheduler::yield_until(time_point time) -> coro::task<void>
     co_return;
 }
 
-auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds timeout) -> coro::task<poll_status>
+auto io_scheduler::poll(
+    fd_t                                                          fd,
+    coro::poll_op                                                 op,
+    std::chrono::milliseconds                                     timeout,
+    std::optional<std::reference_wrapper<detail::notify_trigger>> cancel_on_notify) -> coro::task<poll_status>
 {
     // Because the size will drop when this coroutine suspends every poll needs to undo the subtraction
     // on the number of active tasks in the scheduler.  When this task is resumed by the event loop.
@@ -143,9 +149,14 @@ auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds tim
         pi.m_timer_pos = add_timer_token(clock::now() + timeout, pi);
     }
 
-    if (!m_io_notifier.watch(pi))
+    if (cancel_on_notify.has_value())
     {
-        std::cerr << "Failed to add " << fd << " to watch list\n";
+        // Watch for the notify to be set to cancel the poll operation
+        m_io_notifier.watch_with_cancel(pi, cancel_on_notify.value());
+    }
+    else
+    {
+        m_io_notifier.watch(pi);
     }
 
     // The event loop will 'clean-up' whichever event didn't win since the coroutine is scheduled

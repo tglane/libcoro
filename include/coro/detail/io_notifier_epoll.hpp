@@ -40,18 +40,19 @@ public:
 
     ~io_notifier_epoll();
 
-    auto watch_timer(const detail::timer_handle& timer, std::chrono::nanoseconds duration) -> bool;
+    auto watch_timer(const timer_handle& timer, std::chrono::nanoseconds duration) -> bool;
 
-    auto watch(fd_t fd, coro::poll_op op, void* data, bool keep = false) -> bool;
+    auto watch(fd_t fd, poll_op op, void* data, bool keep = false) -> bool;
 
-    auto watch(detail::poll_info& pi) -> bool;
+    auto watch(poll_info& pi) -> bool;
+
+    auto watch_with_cancel(poll_info& pi, notify_trigger& cancel) -> bool;
 
     auto unwatch(detail::poll_info& pi) -> bool;
 
-    auto unwatch_timer(const detail::timer_handle& timer) -> bool;
+    auto unwatch_timer(const timer_handle& timer) -> bool;
 
-    auto next_events(
-        std::vector<std::pair<detail::poll_info*, coro::poll_status>>& ready_events, std::chrono::milliseconds timeout)
+    auto next_events(std::vector<std::pair<poll_info*, poll_status>>& ready_events, std::chrono::milliseconds timeout)
         -> void;
 };
 

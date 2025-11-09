@@ -1,12 +1,11 @@
 #include "coro/detail/io_notifier_epoll.hpp"
 
-#include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <stdexcept>
 
 #include "coro/detail/timer_handle.hpp"
+#include "coro/poll.hpp"
 
 using namespace std::chrono_literals;
 
@@ -26,7 +25,7 @@ io_notifier_epoll::~io_notifier_epoll()
     }
 }
 
-auto io_notifier_epoll::watch_timer(const detail::timer_handle& timer, std::chrono::nanoseconds duration) -> bool
+auto io_notifier_epoll::watch_timer(const timer_handle& timer, std::chrono::nanoseconds duration) -> bool
 {
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
     duration -= seconds;
@@ -50,7 +49,7 @@ auto io_notifier_epoll::watch_timer(const detail::timer_handle& timer, std::chro
     return ::timerfd_settime(timer.get_fd(), 0, &ts, nullptr) != -1;
 }
 
-auto io_notifier_epoll::watch(fd_t fd, coro::poll_op op, void* data, bool keep) -> bool
+auto io_notifier_epoll::watch(fd_t fd, poll_op op, void* data, bool keep) -> bool
 {
     auto event_data     = event_t{};
     event_data.events   = static_cast<uint32_t>(op) | EPOLLRDHUP;
@@ -62,7 +61,7 @@ auto io_notifier_epoll::watch(fd_t fd, coro::poll_op op, void* data, bool keep) 
     return ::epoll_ctl(m_fd, EPOLL_CTL_ADD, fd, &event_data) != -1;
 }
 
-auto io_notifier_epoll::watch(detail::poll_info& pi) -> bool
+auto io_notifier_epoll::watch(poll_info& pi) -> bool
 {
     auto event_data     = event_t{};
     event_data.events   = static_cast<uint32_t>(pi.m_op) | EPOLLONESHOT | EPOLLRDHUP | EPOLLHUP;
@@ -70,12 +69,18 @@ auto io_notifier_epoll::watch(detail::poll_info& pi) -> bool
     return ::epoll_ctl(m_fd, EPOLL_CTL_ADD, pi.m_fd, &event_data) != -1;
 }
 
-auto io_notifier_epoll::unwatch(detail::poll_info& pi) -> bool
+auto io_notifier_epoll::watch_with_cancel(poll_info& pi, notify_trigger& cancel) -> bool
+{
+    watch(pi);
+    return watch(cancel.receiver_handle(), poll_op::read, static_cast<void*>(&pi));
+}
+
+auto io_notifier_epoll::unwatch(poll_info& pi) -> bool
 {
     return ::epoll_ctl(m_fd, EPOLL_CTL_DEL, pi.m_fd, nullptr) != -1;
 }
 
-auto io_notifier_epoll::unwatch_timer(const detail::timer_handle& timer) -> bool
+auto io_notifier_epoll::unwatch_timer(const timer_handle& timer) -> bool
 {
     // Setting these values to zero disables the timer.
     itimerspec ts{};
@@ -85,16 +90,25 @@ auto io_notifier_epoll::unwatch_timer(const detail::timer_handle& timer) -> bool
 }
 
 auto io_notifier_epoll::next_events(
-    std::vector<std::pair<detail::poll_info*, coro::poll_status>>& ready_events, std::chrono::milliseconds timeout)
-    -> void
+    std::vector<std::pair<poll_info*, poll_status>>& ready_events, std::chrono::milliseconds timeout) -> void
 {
     auto ready_set = std::array<event_t, m_max_events>{};
     int  num_ready = ::epoll_wait(m_fd, ready_set.data(), ready_set.size(), timeout.count());
     for (int i = 0; i < num_ready; ++i)
     {
-        ready_events.emplace_back(
-            static_cast<detail::poll_info*>(ready_set[i].data.ptr),
-            io_notifier_epoll::event_to_poll_status(ready_set[i]));
+        auto* pi = static_cast<poll_info*>(ready_set[i].data.ptr);
+
+        // Check if the event was triggered from the poll events file descriptor. Non-matching file descriptors indicate
+        // that the event was issued by the the trigger to cancel the monitored event.
+        if (ready_set[i].data.fd == pi->m_fd)
+        {
+            ready_events.emplace_back(
+                static_cast<poll_info*>(ready_set[i].data.ptr), io_notifier_epoll::event_to_poll_status(ready_set[i]));
+        }
+        else
+        {
+            ready_events.emplace_back(static_cast<poll_info*>(ready_set[i].data.ptr), poll_status::cancelled);
+        }
     }
 }
 

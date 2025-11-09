@@ -7,7 +7,6 @@
 #include "coro/io_notifier.hpp"
 #include "coro/poll.hpp"
 #include "coro/thread_pool.hpp"
-#include <unistd.h>
 
 #ifdef LIBCORO_FEATURE_NETWORKING
     #include "coro/net/socket.hpp"
@@ -17,9 +16,12 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 namespace coro
 {
@@ -324,7 +326,11 @@ public:
      *                block indefinitely until the event triggers.
      * @return The result of the poll operation.
      */
-    [[nodiscard]] auto poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds timeout = std::chrono::milliseconds{0})
+    [[nodiscard]] auto poll(
+        fd_t                                                          fd,
+        coro::poll_op                                                 op,
+        std::chrono::milliseconds                                     timeout        = std::chrono::milliseconds{0},
+        std::optional<std::reference_wrapper<detail::notify_trigger>> cancel_trigger = std::nullopt)
         -> coro::task<poll_status>;
 
 #ifdef LIBCORO_FEATURE_NETWORKING
@@ -337,10 +343,13 @@ public:
      * @return THe result of the poll operation.
      */
     [[nodiscard]] auto poll(
-        const net::socket& sock, coro::poll_op op, std::chrono::milliseconds timeout = std::chrono::milliseconds{0})
+        const net::socket&                                            sock,
+        coro::poll_op                                                 op,
+        std::chrono::milliseconds                                     timeout        = std::chrono::milliseconds{0},
+        std::optional<std::reference_wrapper<detail::notify_trigger>> cancel_trigger = std::nullopt)
         -> coro::task<poll_status>
     {
-        return poll(sock.native_handle(), op, timeout);
+        return poll(sock.native_handle(), op, timeout, cancel_trigger);
     }
 #endif
 

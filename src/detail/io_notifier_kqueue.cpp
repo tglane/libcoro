@@ -2,10 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <bitset>
 #include <chrono>
-#include <iostream>
+#include <cstdint>
 #include <stdexcept>
 
 #include "coro/detail/poll_info.hpp"
@@ -65,51 +63,24 @@ auto io_notifier_kqueue::watch(fd_t fd, coro::poll_op op, void* data, bool keep)
     return ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr) != -1;
 }
 
+auto io_notifier_kqueue::watch_with_cancel(poll_info& pi, notify_trigger& cancel_trigger) -> bool
+{
+    watch(pi);
+    return watch(cancel_trigger.receiver_handle(), poll_op::read, static_cast<void*>(&pi));
+}
+
 auto io_notifier_kqueue::watch(detail::poll_info& pi) -> bool
 {
-    // TODO Rework this? This causes a segfault in some test cases?
-    m_event_handles.insert({{pi.m_fd, pi.m_op}, static_cast<void*>(&pi)});
-    watch(pi.m_fd, poll_op::user_triggered, nullptr);
-
     // For read-write event, we need to register both event types separately to the kqueue
     if (pi.m_op == coro::poll_op::read_write)
     {
-        auto event_data = event_t{};
-
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(coro::poll_op::read),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
-        ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
-
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(coro::poll_op::write),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
-        ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
-
+        watch(pi.m_fd, poll_op::read, static_cast<void*>(&pi));
+        watch(pi.m_fd, poll_op::write, static_cast<void*>(&pi));
         return true;
     }
     else
     {
-        auto event_data = event_t{};
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(pi.m_op),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
-        return ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr) != -1;
+        return watch(pi.m_fd, pi.m_op, static_cast<void*>(&pi));
     }
 }
 
@@ -157,30 +128,18 @@ auto io_notifier_kqueue::next_events(
         m_fd, nullptr, 0, ready_set.data(), std::min(ready_set.size(), ready_events.capacity()), &timeout_spec);
     for (int i = 0; i < num_ready; i++)
     {
-        detail::poll_info* udata = nullptr;
-        if (ready_set[i].filter == EVFILT_USER)
+        auto* pi = static_cast<poll_info*>(ready_set[i].udata);
+
+        // Check if the event was triggered from the poll events file descriptor. Non-matching file descriptors indicate
+        // that the event was issued by the the trigger to cancel the monitored event.
+        if (ready_set[i].ident == static_cast<uintptr_t>(pi->m_fd))
         {
-            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
-            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
-            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
-            {
-                udata = static_cast<detail::poll_info*>(entry->second);
-                m_event_handles.erase(entry);
-            }
+            ready_events.emplace_back(pi, io_notifier_kqueue::event_to_poll_status(ready_set[i]));
         }
         else
         {
-            udata = static_cast<detail::poll_info*>(ready_set[i].udata);
-
-            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
-            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
-            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
-            {
-                m_event_handles.erase(entry);
-            }
+            ready_events.emplace_back(pi, poll_status::cancelled);
         }
-
-        ready_events.emplace_back(udata, io_notifier_kqueue::event_to_poll_status(ready_set[i]));
     }
 }
 
@@ -209,10 +168,6 @@ auto io_notifier_kqueue::event_to_poll_status(const event_t& event) -> poll_stat
     {
         // Due timer is handled like a read event by the lib
         return poll_status::read;
-    }
-    else if (event.filter == EVFILT_USER)
-    {
-        return poll_status::closed;
     }
 
     throw std::runtime_error{"invalid kqueue state"};
