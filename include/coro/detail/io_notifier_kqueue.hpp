@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <ctime>
-#include <map>
 #include <vector>
 
 #include <sys/event.h>
@@ -25,8 +24,7 @@ class io_notifier_kqueue
 {
     static const constexpr std::size_t m_max_events = 16;
 
-    std::map<std::pair<fd_t, poll_op>, void*> m_event_handles;
-    fd_t                                      m_fd;
+    fd_t m_fd;
 
     friend class detail::timer_handle;
 
@@ -47,6 +45,8 @@ public:
     auto watch(fd_t fd, coro::poll_op op, void* data, bool keep = false) -> bool;
 
     auto watch(detail::poll_info& pi) -> bool;
+
+    auto unwatch(fd_t fd, poll_op op) -> bool;
 
     auto unwatch(detail::poll_info& pi) -> bool;
 

@@ -2,10 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <bitset>
 #include <chrono>
-#include <iostream>
+#include <cstdint>
 #include <stdexcept>
 
 #include "coro/detail/poll_info.hpp"
@@ -67,33 +65,39 @@ auto io_notifier_kqueue::watch(fd_t fd, coro::poll_op op, void* data, bool keep)
 
 auto io_notifier_kqueue::watch(detail::poll_info& pi) -> bool
 {
-    // TODO Rework this? This causes a segfault in some test cases?
-    m_event_handles.insert({{pi.m_fd, pi.m_op}, static_cast<void*>(&pi)});
-    watch(pi.m_fd, poll_op::user_triggered, nullptr);
-
     // For read-write event, we need to register both event types separately to the kqueue
     if (pi.m_op == coro::poll_op::read_write)
     {
+        watch(pi.m_fd, poll_op::read, static_cast<void*>(&pi));
+        watch(pi.m_fd, poll_op::write, static_cast<void*>(&pi));
+    }
+    else
+    {
+        if (!watch(pi.m_fd, pi.m_op, static_cast<void*>(&pi)))
+        {
+            return false;
+        }
+    }
+
+    if (pi.m_cancel_trigger.has_value())
+    {
+        watch(pi.m_cancel_trigger.value().native_handle(), poll_op::read, static_cast<void*>(&pi));
+    }
+
+    return true;
+}
+
+auto io_notifier_kqueue::unwatch(fd_t fd, poll_op op) -> bool
+{
+    // For read-write event, we need to de-register both event types separately to the kqueue
+    if (op == coro::poll_op::read_write)
+    {
         auto event_data = event_t{};
 
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(coro::poll_op::read),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
+        EV_SET(&event_data, fd, static_cast<int16_t>(coro::poll_op::read), EV_DELETE, 0, 0, nullptr);
         ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
 
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(coro::poll_op::write),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
+        EV_SET(&event_data, fd, static_cast<int16_t>(coro::poll_op::write), EV_DELETE, 0, 0, nullptr);
         ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
 
         return true;
@@ -101,39 +105,14 @@ auto io_notifier_kqueue::watch(detail::poll_info& pi) -> bool
     else
     {
         auto event_data = event_t{};
-        EV_SET(
-            &event_data,
-            pi.m_fd,
-            static_cast<int16_t>(pi.m_op),
-            EV_ADD | EV_CLEAR | EV_ONESHOT | EV_ENABLE,
-            0,
-            0,
-            static_cast<void*>(&pi));
+        EV_SET(&event_data, fd, static_cast<int16_t>(op), EV_DELETE, 0, 0, nullptr);
         return ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr) != -1;
     }
 }
 
 auto io_notifier_kqueue::unwatch(detail::poll_info& pi) -> bool
 {
-    // For read-write event, we need to de-register both event types separately to the kqueue
-    if (pi.m_op == coro::poll_op::read_write)
-    {
-        auto event_data = event_t{};
-
-        EV_SET(&event_data, pi.m_fd, static_cast<int16_t>(coro::poll_op::read), EV_DELETE, 0, 0, nullptr);
-        ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
-
-        EV_SET(&event_data, pi.m_fd, static_cast<int16_t>(coro::poll_op::write), EV_DELETE, 0, 0, nullptr);
-        ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr);
-
-        return true;
-    }
-    else
-    {
-        auto event_data = event_t{};
-        EV_SET(&event_data, pi.m_fd, static_cast<int16_t>(pi.m_op), EV_DELETE, 0, 0, nullptr);
-        return ::kevent(m_fd, &event_data, 1, nullptr, 0, nullptr) != -1;
-    }
+    return unwatch(pi.m_fd, pi.m_op);
 }
 
 auto io_notifier_kqueue::unwatch_timer(const detail::timer_handle& timer) -> bool
@@ -157,30 +136,24 @@ auto io_notifier_kqueue::next_events(
         m_fd, nullptr, 0, ready_set.data(), std::min(ready_set.size(), ready_events.capacity()), &timeout_spec);
     for (int i = 0; i < num_ready; i++)
     {
-        detail::poll_info* udata = nullptr;
-        if (ready_set[i].filter == EVFILT_USER)
+        auto* pi = static_cast<poll_info*>(ready_set[i].udata);
+
+        // If the event issuing fd is the same as the fd of the cancellation trigger of the registered poll_info we
+        // this operation was cancelled by the user.
+        if (pi->m_cancel_trigger.has_value() &&
+            ready_set[i].ident == static_cast<uintptr_t>(pi->m_cancel_trigger.value().native_handle()))
         {
-            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
-            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
-            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
-            {
-                udata = static_cast<detail::poll_info*>(entry->second);
-                m_event_handles.erase(entry);
-            }
+            ready_events.emplace_back(pi, poll_status::cancelled);
+            unwatch(*pi);
         }
         else
         {
-            udata = static_cast<detail::poll_info*>(ready_set[i].udata);
-
-            int64_t x   = reinterpret_cast<int64_t>(ready_set[i].udata);
-            auto    key = std::pair(ready_set[i].ident, static_cast<poll_op>(x));
-            if (auto entry = m_event_handles.find(key); entry != m_event_handles.end())
+            ready_events.emplace_back(pi, io_notifier_kqueue::event_to_poll_status(ready_set[i]));
+            if (pi->m_cancel_trigger.has_value())
             {
-                m_event_handles.erase(entry);
+                unwatch(pi->m_cancel_trigger.value().native_handle(), poll_op::read);
             }
         }
-
-        ready_events.emplace_back(udata, io_notifier_kqueue::event_to_poll_status(ready_set[i]));
     }
 }
 
@@ -210,12 +183,21 @@ auto io_notifier_kqueue::event_to_poll_status(const event_t& event) -> poll_stat
         // Due timer is handled like a read event by the lib
         return poll_status::read;
     }
-    else if (event.filter == EVFILT_USER)
-    {
-        return poll_status::closed;
-    }
 
     throw std::runtime_error{"invalid kqueue state"};
+}
+
+auto encode_to_uint64(fd_t fd, void* udata) -> uint64_t
+{
+    return (((uint64_t)fd) << 48) | (reinterpret_cast<uintptr_t>(udata) & 0xFFFFFFFFFFFFULL);
+}
+
+auto decode_from_uint64_t(uint64_t encoded) -> std::pair<fd_t, void*>
+{
+    fd_t  fd    = (uint16_t)(encoded >> 48);
+    void* udata = reinterpret_cast<void*>(encoded & 0xFFFFFFFFFFFFULL);
+
+    return std::make_pair(fd, udata);
 }
 
 } // namespace coro::detail
