@@ -6,6 +6,7 @@
 #include <optional>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <type_traits>
 #include <unistd.h>
 
 using namespace std::chrono_literals;
@@ -107,7 +108,9 @@ auto io_scheduler::yield_until(time_point time) -> coro::task<void>
     co_return;
 }
 
-auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds timeout) -> coro::task<poll_status>
+auto io_scheduler::poll(
+    fd_t fd, coro::poll_op op, std::chrono::milliseconds timeout, std::optional<poll_stop_token> cancel_trigger)
+    -> coro::task<poll_status>
 {
     // Because the size will drop when this coroutine suspends every poll needs to undo the subtraction
     // on the number of active tasks in the scheduler.  When this task is resumed by the event loop.
@@ -119,7 +122,7 @@ auto io_scheduler::poll(fd_t fd, coro::poll_op op, std::chrono::milliseconds tim
 
     bool timeout_requested = (timeout > 0ms);
 
-    auto pi = detail::poll_info{fd, op};
+    auto pi = detail::poll_info{fd, op, cancel_trigger};
 
     if (timeout_requested)
     {
@@ -144,7 +147,6 @@ auto io_scheduler::shutdown() noexcept -> void
     // Only allow shutdown to occur once.
     if (m_shutdown_requested.exchange(true, std::memory_order::acq_rel) == false)
     {
-
         // Signal the event loop to stop asap.
         const int value{1};
         ::write(m_shutdown_pipe.write_fd(), reinterpret_cast<const void*>(&value), sizeof(value));
@@ -282,10 +284,11 @@ auto io_scheduler::process_scheduled_execute_inline() -> void
         // Clear the notification by reading until the pipe is cleared.
         while (true)
         {
-            constexpr std::size_t READ_COUNT{4};
-            constexpr ssize_t READ_COUNT_BYTES = READ_COUNT * sizeof(int);
+            constexpr std::size_t       READ_COUNT{4};
+            constexpr ssize_t           READ_COUNT_BYTES = READ_COUNT * sizeof(int);
             std::array<int, READ_COUNT> control{};
-            const ssize_t result = ::read(m_schedule_pipe.read_fd(), reinterpret_cast<void*>(control.data()), READ_COUNT_BYTES);
+            const ssize_t               result =
+                ::read(m_schedule_pipe.read_fd(), reinterpret_cast<void*>(control.data()), READ_COUNT_BYTES);
             if (result == READ_COUNT_BYTES)
             {
                 continue;
@@ -304,7 +307,8 @@ auto io_scheduler::process_scheduled_execute_inline() -> void
             }
 
             // Not much we can do here, we're in a very bad state, lets report to stderr.
-            std::cerr << "::read(m_schedule_pipe.read_fd()) error[" << errno << "] " << ::strerror(errno) << " fd=[" << m_schedule_pipe.read_fd() << "]" << std::endl;
+            std::cerr << "::read(m_schedule_pipe.read_fd()) error[" << errno << "] " << ::strerror(errno) << " fd=["
+                      << m_schedule_pipe.read_fd() << "]" << std::endl;
             break;
         }
 

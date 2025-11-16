@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
 #include <ctime>
 #include <vector>
 
@@ -24,9 +23,12 @@ class timer_handle;
 class io_notifier_kqueue
 {
     static const constexpr std::size_t m_max_events = 16;
-    fd_t                               m_fd;
+
+    fd_t m_fd;
 
     friend class detail::timer_handle;
+
+    static auto event_to_poll_status(const event_t& event) -> poll_status;
 
 public:
     io_notifier_kqueue();
@@ -44,6 +46,8 @@ public:
 
     auto watch(detail::poll_info& pi) -> bool;
 
+    auto unwatch(fd_t fd, poll_op op) -> bool;
+
     auto unwatch(detail::poll_info& pi) -> bool;
 
     auto unwatch_timer(const detail::timer_handle& timer) -> bool;
@@ -52,7 +56,7 @@ public:
         std::vector<std::pair<detail::poll_info*, coro::poll_status>>& ready_events, std::chrono::milliseconds timeout)
         -> void;
 
-    static auto event_to_poll_status(const event_t& event) -> poll_status;
+    auto native_handle() const -> fd_t { return m_fd; }
 };
 
 } // namespace coro::detail
